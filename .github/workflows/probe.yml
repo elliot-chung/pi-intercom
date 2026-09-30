@@ -1,0 +1,35 @@
+name: windows-broker-probe
+on: push
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx tsx --test broker/spawn.test.ts
+      - name: Spawn broker through spawnBrokerIfNeeded
+        shell: pwsh
+        run: |
+          $env:PI_CODING_AGENT_DIR = Join-Path $env:RUNNER_TEMP "agent"
+          @'
+          const { pathToFileURL } = await import("node:url");
+          const { spawnBrokerIfNeeded } = await import(pathToFileURL(process.argv[2]).href);
+          await spawnBrokerIfNeeded("npx", ["--no-install", "tsx"]);
+          console.log("broker up");
+          '@ | Set-Content smoke.mts
+          npx tsx smoke.mts (Resolve-Path broker/spawn.ts).Path
+          if ($LASTEXITCODE -ne 0) { throw "spawn failed" }
+          $dir = Join-Path $env:PI_CODING_AGENT_DIR "intercom"
+          Get-ChildItem $dir | Select-Object Name
+          $brokerPid = [int](Get-Content (Join-Path $dir "broker.pid"))
+          Get-CimInstance Win32_Process -Filter "ProcessId=$brokerPid" | Format-List ProcessId,ParentProcessId,Name,CommandLine
+          $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$brokerPid")
+          "children: $($kids.Count)"
+          $kids | Format-List ProcessId,Name,CommandLine
+          if (Test-Path (Join-Path $dir "broker-launch.vbs")) { throw "vbs written" }
+          if ($kids | Where-Object { $_.Name -eq "node.exe" }) { throw "broker re-spawned node" }
+          if ($kids | Where-Object { $_.Name -eq "conhost.exe" }) { throw "broker allocated a console" }
+          Stop-Process -Id $brokerPid
