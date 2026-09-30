@@ -6,6 +6,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { once } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import type { Message, MessageReceipt, SessionInfo } from "./types.ts";
 
 const repoDir = process.cwd();
@@ -34,7 +35,7 @@ process.on("exit", () => {
 });
 
 const { IntercomClient } = await import("./broker/client.ts");
-const { getTsxCliPath } = await import("./broker/spawn.ts");
+const { getTsxLoaderPath } = await import("./broker/spawn.ts");
 const { fauxProvider, fauxAssistantMessage } = await import("@earendil-works/pi-ai");
 const {
   createAgentSession,
@@ -69,7 +70,7 @@ async function waitFor(predicate: () => boolean, description: string, timeoutMs 
 }
 
 async function startBroker(): Promise<ChildProcess> {
-  const broker: ChildProcess = spawn(process.execPath, [getTsxCliPath(), path.join(repoDir, "broker", "broker.ts")], {
+  const broker: ChildProcess = spawn(process.execPath, ["--import", pathToFileURL(getTsxLoaderPath()).href, path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],

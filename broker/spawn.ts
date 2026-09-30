@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { createRequire } from "module";
 import net from "net";
 import { randomUUID } from "crypto";
@@ -24,52 +24,32 @@ const BROKER_PID = join(INTERCOM_DIR, "broker.pid");
 const BROKER_SPAWN_LOCK = join(INTERCOM_DIR, "broker.spawn.lock");
 const BROKER_STARTUP_STDERR_LIMIT = 4_000;
 
-type BrokerLaunchSpec =
-  | {
-    kind: "direct";
-    command: string;
-    args: string[];
-    captureStartupStderr: boolean;
-  }
-  | {
-    kind: "windows-launcher";
-    command: string;
-    args: string[];
-    launcherPath: string;
-    launcherCommandLine: string;
-    captureStartupStderr: boolean;
-  };
+type BrokerLaunchSpec = {
+  command: string;
+  args: string[];
+  captureStartupStderr: boolean;
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export function getTsxCliPath(extensionDir: string = EXTENSION_DIR): string {
+export function getTsxLoaderPath(extensionDir: string = EXTENSION_DIR): string {
   // Resolve tsx via Node's module resolution so it works regardless of whether
   // tsx is bundled under extensionDir/node_modules or hoisted to a workspace
-  // root by npm. We resolve the tsx package main entry (its "exports" field
-  // does not expose ./dist/cli.mjs as a subpath) and then locate cli.mjs next
-  // to it. If resolution fails, prefer the flat plugin-store layout before the
-  // legacy nested fallback.
+  // root by npm. The tsx package main entry is its loader. If resolution
+  // fails, prefer the flat plugin-store layout before the legacy nested
+  // fallback.
   try {
     const requireFromExtension = createRequire(join(extensionDir, "package.json"));
-    const tsxMain = requireFromExtension.resolve("tsx");
-    return join(dirname(tsxMain), "cli.mjs");
+    return requireFromExtension.resolve("tsx");
   } catch {
-    const siblingTsxCli = join(extensionDir, "..", "tsx", "dist", "cli.mjs");
-    if (existsSync(siblingTsxCli)) {
-      return siblingTsxCli;
+    const siblingTsxLoader = join(extensionDir, "..", "tsx", "dist", "loader.mjs");
+    if (existsSync(siblingTsxLoader)) {
+      return siblingTsxLoader;
     }
-    return join(extensionDir, "node_modules", "tsx", "dist", "cli.mjs");
+    return join(extensionDir, "node_modules", "tsx", "dist", "loader.mjs");
   }
-}
-
-function quoteWindowsArg(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-export function getWindowsHiddenLauncherPath(intercomDir: string = INTERCOM_DIR): string {
-  return join(intercomDir, "broker-launch.vbs");
 }
 
 function usesDefaultBrokerCommand(brokerCommand: string, brokerArgs: string[]): boolean {
@@ -86,29 +66,6 @@ function getNodeCommand(nodePath: string): string {
     : "node";
 }
 
-export function getWindowsBrokerCommandLine(
-  brokerPath: string,
-  extensionDir: string = EXTENSION_DIR,
-  nodePath: string = process.execPath,
-  brokerCommand = "npx",
-  brokerArgs: string[] = ["--no-install", "tsx"],
-): string {
-  if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
-    return [quoteWindowsArg(getNodeCommand(nodePath)), quoteWindowsArg(getTsxCliPath(extensionDir)), quoteWindowsArg(brokerPath)].join(" ");
-  }
-
-  return [quoteWindowsArg(brokerCommand), ...brokerArgs.map(quoteWindowsArg), quoteWindowsArg(brokerPath)].join(" ");
-}
-
-export function getWindowsHiddenLauncherScript(commandLine: string): string {
-  return [
-    'Set WshShell = CreateObject("WScript.Shell")',
-    `WshShell.Run "${commandLine.replace(/"/g, '""')}", 0, False`,
-    'Set WshShell = Nothing',
-    '',
-  ].join("\r\n");
-}
-
 export function isBrokerHealthOkMessage(message: unknown, requestId: string): boolean {
   if (typeof message !== "object" || message === null || !("type" in message)) {
     return false;
@@ -120,51 +77,25 @@ export function isBrokerHealthOkMessage(message: unknown, requestId: string): bo
     && response.version === INTERCOM_PROTOCOL_VERSION;
 }
 
-export function writeWindowsHiddenLauncher(
-  commandLine: string,
-  launcherPath: string = getWindowsHiddenLauncherPath(),
-): string {
-  ensureIntercomRuntimeDir(dirname(launcherPath));
-  writeFileSync(launcherPath, `\uFEFF${getWindowsHiddenLauncherScript(commandLine)}`, {
-    encoding: "utf16le",
-    mode: INTERCOM_RUNTIME_FILE_MODE,
-  });
-  restrictIntercomRuntimeFile(launcherPath);
-  return launcherPath;
-}
-
 export function getBrokerLaunchSpec(
   brokerPath: string,
   brokerCommand: string,
   brokerArgs: string[],
   extensionDir: string = EXTENSION_DIR,
-  platform: NodeJS.Platform = process.platform,
-  intercomDir: string = INTERCOM_DIR,
   nodePath: string = process.execPath,
 ): BrokerLaunchSpec {
-  if (platform === "win32") {
-    const launcherPath = getWindowsHiddenLauncherPath(intercomDir);
-    return {
-      kind: "windows-launcher",
-      command: "wscript.exe",
-      args: ["//E:VBScript", launcherPath],
-      launcherPath,
-      launcherCommandLine: getWindowsBrokerCommandLine(brokerPath, extensionDir, nodePath, brokerCommand, brokerArgs),
-      captureStartupStderr: false,
-    };
-  }
-
   if (usesDefaultBrokerCommand(brokerCommand, brokerArgs)) {
+    // Load tsx in the broker process itself. The tsx CLI would re-spawn Node
+    // without windowsHide, and that grandchild opens a visible console window
+    // on Windows because the detached broker has no console to share.
     return {
-      kind: "direct",
       command: getNodeCommand(nodePath),
-      args: [getTsxCliPath(extensionDir), brokerPath],
+      args: ["--import", pathToFileURL(getTsxLoaderPath(extensionDir)).href, brokerPath],
       captureStartupStderr: true,
     };
   }
 
   return {
-    kind: "direct",
     command: brokerCommand,
     args: [...brokerArgs, brokerPath],
     captureStartupStderr: false,
@@ -216,9 +147,6 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
 
     const brokerPath = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
     const launch = getBrokerLaunchSpec(brokerPath, brokerCommand, brokerArgs);
-    if (launch.kind === "windows-launcher") {
-      writeWindowsHiddenLauncher(launch.launcherCommandLine, launch.launcherPath);
-    }
     const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(process.env, launch.captureStartupStderr));
     let brokerStderr = "";
     const rememberBrokerStderr = (chunk: Buffer | string) => {
@@ -247,9 +175,6 @@ export async function spawnBrokerIfNeeded(brokerCommand: string, brokerArgs: str
       };
 
       const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-        if (launch.kind === "windows-launcher" && code === 0 && signal === null) {
-          return;
-        }
         cleanup();
         if (signal) {
           reject(brokerStartupError(`Intercom broker exited before startup with signal ${signal}`));

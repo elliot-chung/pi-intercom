@@ -5,6 +5,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { ReplyTracker } from "./reply-tracker.ts";
 import type { BrokerMessage, Message, SessionInfo } from "./types.ts";
 import {
@@ -39,7 +40,8 @@ process.env.USERPROFILE = sharedHomeDir;
 // Herdr pane. Individual Herdr integration cases register an explicit pane id.
 delete process.env.HERDR_PANE_ID;
 const { IntercomClient } = await import("./broker/client.ts");
-const { getTsxCliPath } = await import("./broker/spawn.ts");
+const { getTsxLoaderPath } = await import("./broker/spawn.ts");
+const tsxImportArgs = ["--import", pathToFileURL(getTsxLoaderPath()).href];
 const { getAskTimeoutMs, getConfigPath } = await import("./config.ts");
 process.on("exit", () => {
   process.env.HOME = previousHome;
@@ -299,7 +301,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
   const { createMessageReader, writeMessage } = await import("./broker/framing.ts");
   const agentDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-tcp-agent-"));
   const broker = spawn(process.execPath, [
-    getTsxCliPath(),
+    ...tsxImportArgs,
     "-e",
     "Object.defineProperty(process, 'platform', { value: 'win32' }); import('./broker/broker.ts').catch((error) => { console.error(error); process.exit(1); });",
   ], {
@@ -413,7 +415,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
 });
 
 async function setupClients() {
-  const broker = spawn(process.execPath, [getTsxCliPath(), path.join(repoDir, "broker", "broker.ts")], {
+  const broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
@@ -674,7 +676,7 @@ test("broker accepts caller supplied stable IDs across reconnect", { concurrency
 });
 
 test("broker scopes discovery, routing, mailbox, and presence", { concurrency: false }, async () => {
-  const broker = spawn(process.execPath, [getTsxCliPath(), path.join(repoDir, "broker", "broker.ts")], {
+  const broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
